@@ -96,6 +96,9 @@ static struct proc *allocproc(void) {
 
 found:
   p->pid = allocpid();
+  p->syscall_mask = ~0UL;
+  p->syscall_loglen = 0;
+  p->max_children = -1;
 
   // Allocate a trapframe page.
   if ((p->trapframe = (struct trapframe *)kalloc()) == 0) {
@@ -230,6 +233,15 @@ int fork(void) {
   struct proc *np;
   struct proc *p = myproc();
 
+  if (p->max_children >= 0) {
+    int children = 0;
+    acquire(&p->lock);
+    for (np = proc; np < &proc[NPROC]; np++)
+      if (np->parent == p) children++;
+    release(&p->lock);
+    if (children >= p->max_children) return -1;
+  }
+
   // Allocate process.
   if ((np = allocproc()) == 0) {
     return -1;
@@ -244,6 +256,8 @@ int fork(void) {
   np->sz = p->sz;
 
   np->parent = p;
+  np->syscall_mask = p->syscall_mask;
+  np->max_children = p->max_children;
 
   // copy saved user registers.
   *(np->trapframe) = *(p->trapframe);
@@ -338,6 +352,21 @@ void exit(int status) {
 
   acquire(&p->lock);
 
+#ifdef LAB_SYSCALL_TEST
+  static char *states[] = {"unused", "sleeping", "runnable", "running", "zombie"};
+  printf("proc %d exit, parent pid %d, name %s, state %s\n", p->pid,
+         original_parent->pid, original_parent->name, states[original_parent->state]);
+  int child = 0;
+  for (struct proc *pp = proc; pp < &proc[NPROC]; pp++) {
+    if (pp->parent == p) {
+      acquire(&pp->lock);
+      printf("proc %d exit, child %d, pid %d, name %s, state %s\n", p->pid,
+             child++, pp->pid, pp->name, states[pp->state]);
+      release(&pp->lock);
+    }
+  }
+#endif
+
   // Give any children to init.
   reparent(p);
 
@@ -356,7 +385,7 @@ void exit(int status) {
 
 // Wait for a child process to exit and return its pid.
 // Return -1 if this process has no children.
-int wait(uint64 addr) {
+int wait(uint64 addr, int nonblock) {
   struct proc *np;
   int havekids, pid;
   struct proc *p = myproc();
@@ -395,7 +424,7 @@ int wait(uint64 addr) {
     }
 
     // No point waiting if we don't have any children.
-    if (!havekids || p->killed) {
+    if (!havekids || p->killed || nonblock) {
       release(&p->lock);
       return -1;
     }
@@ -428,6 +457,11 @@ void scheduler(void) {
         // Switch to chosen process.  It is the process's job
         // to release its lock and then reacquire it
         // before jumping back to us.
+        if (c->yield_trace) {
+          printf("Next runnable process pid is %d and user pc is %p\n", p->pid,
+                 p->trapframe->epc);
+          c->yield_trace = 0;
+        }
         p->state = RUNNING;
         c->proc = p;
         swtch(&c->context, &p->context);

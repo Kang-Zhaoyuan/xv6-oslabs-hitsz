@@ -22,6 +22,7 @@ struct context {
 struct cpu {
   struct proc *proc;          // The process running on this cpu, or null.
   struct context context;     // swtch() here to enter scheduler().
+  int yield_trace;
   int noff;                   // Depth of push_off() nesting.
   int intena;                 // Were interrupts enabled before push_off()?
 };
@@ -102,5 +103,9 @@ struct proc {
   struct context context;      // swtch() here to run process
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
+  uint64 syscall_mask;
+  uint64 syscall_log[32];
+  int syscall_loglen;
+  int max_children;
   char name[16];               // Process name (debugging)
 };
