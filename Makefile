@@ -275,7 +275,7 @@ format:
 	python3 clang-format.py
 
 diff:
-	git diff syscall-base-26 HEAD > commit.patch
+	git diff syscall-26-fall-v2 HEAD > commit.patch
 
 ##
 ## FOR web handin
