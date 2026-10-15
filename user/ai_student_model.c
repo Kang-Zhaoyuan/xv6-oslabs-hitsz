@@ -1,38 +1,69 @@
 #include "kernel/types.h"
+#include "kernel/fcntl.h"
 #include "user/user.h"
 
 #include "ai_student_impl.h"
 
+struct model_cache {
+  uchar valid[AI_TOTAL_SHARDS];
+  char data[AI_TOTAL_SHARDS][AI_SHARD_BYTES];
+};
+
 int
 ai_student_model_begin(struct ai_session *session)
 {
-  // TODO(LAB3-AI，附加题一)：初始化当前 worker 的模型加载状态。
-  // 可以在这里申请 worker 私有缓存；不得修改全局模型文件或扩大 NBUF。
-  // 单项验证：先运行 modelprep，再运行 aimodeltest。
-  (void)session;
-  return -1;
+  struct model_cache *cache = malloc(sizeof(*cache));
+  session->memory = cache;
+  if(!cache)
+    return -1;
+  memset(cache->valid, 0, sizeof(cache->valid));
+  return 0;
 }
 
 int
 ai_student_model_load(struct ai_session *session, uint family, uint shard,
                       char *block, struct ai_io *io)
 {
-  // TODO(LAB3-AI，附加题一)：加载一个模型块或 embedding shard。
-  // 首次数据必须来自 xv6 文件系统，成功时 block 中必须恰好有
-  // AI_SHARD_BYTES 字节；只有真实读取成功后才能更新 io 字节数。
-  // 建议先读懂 ai_baseline.c 的经典 open-read-close 数据流，再考虑缓存。
-  (void)session;
-  (void)family;
-  (void)shard;
-  (void)block;
-  (void)io;
-  return -1;
+  struct model_cache *cache = session->memory;
+  char name[AI_SHARD_NAME_LEN];
+  uint index;
+
+  if(!cache || (family != AI_MODEL_FAMILY && family != AI_EMBED_FAMILY) ||
+     shard >= (family == AI_MODEL_FAMILY ? AI_MODEL_SHARDS : AI_EMBED_SHARDS))
+    return -1;
+  index = shard + (family == AI_EMBED_FAMILY ? AI_MODEL_SHARDS : 0);
+  if(!cache->valid[index]) {
+    ai_shard_name(name, family, shard);
+    int fd = open(name, O_RDONLY);
+    if(fd < 0)
+      return -1;
+    int offset = 0;
+    while(offset < AI_SHARD_BYTES) {
+      int n = read(fd, cache->data[index] + offset, AI_SHARD_BYTES - offset);
+      if(n <= 0) {
+        close(fd);
+        return -1;
+      }
+      offset += n;
+    }
+    close(fd);
+    for(offset = 0; offset < AI_SHARD_BYTES; offset++)
+      if((uchar)cache->data[index][offset] != ai_byte(family, shard, offset))
+        return -1;
+    cache->valid[index] = 1;
+    if(family == AI_MODEL_FAMILY)
+      io->model_read_bytes += AI_SHARD_BYTES;
+    else
+      io->embed_read_bytes += AI_SHARD_BYTES;
+  }
+  memmove(block, cache->data[index], AI_SHARD_BYTES);
+  return 0;
 }
 
 void
 ai_student_model_end(struct ai_session *session)
 {
-  // TODO(LAB3-AI，附加题一)：释放缓存并关闭尚未关闭的模型文件描述符。
-  // 失败路径和正常路径都必须能够安全调用本函数，资源只能释放一次。
-  (void)session;
+  if(session->memory)
+    free(session->memory);
+  session->memory = 0;
 }

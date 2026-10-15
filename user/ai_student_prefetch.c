@@ -1,52 +1,128 @@
 #include "kernel/types.h"
+#include "kernel/fcntl.h"
 #include "user/user.h"
 
 #include "ai_student_impl.h"
 
+// state[4..7]: child pid, command pipe, result pipe, pending/ready state.
+static int
+transfer(int fd, void *buffer, int length, int writing)
+{
+  char *p = buffer;
+  while(length > 0) {
+    int n = writing ? write(fd, p, length) : read(fd, p, length);
+    if(n <= 0)
+      return -1;
+    p += n;
+    length -= n;
+  }
+  return 0;
+}
+
+static void
+prefetch_worker(struct ai_session *session, int commands, int results)
+{
+  struct kv_entry kv[AI_KV_TOKENS];
+  struct ai_io io = {0};
+  char name[AI_STREAM_NAME_LEN];
+  int request;
+
+  close(session->state[1]);
+  ai_student_kv_name(name, session->worker);
+  session->state[1] = open(name, O_RDONLY);
+  while(transfer(commands, &request, sizeof(request), 0) == 0) {
+    int status = ai_student_kv_restore(session, request, kv, &io);
+    if(transfer(results, &status, sizeof(status), 1) < 0 || status < 0 ||
+       transfer(results, kv, sizeof(kv), 1) < 0)
+      break;
+  }
+  if(session->state[1] >= 0)
+    close(session->state[1]);
+  close(commands);
+  close(results);
+  exit(0);
+}
+
 int
 ai_student_prefetch_begin(struct ai_session *session)
 {
-  // TODO(LAB3-AI，选做)：建立固定小窗口的 KV 预取状态。
-  // 推荐使用轻量辅助进程提前读取下一条记录，让数据进入共享 buffer cache。
-  // 不允许扩大 NBUF，也不能跳过附加题二要求的真实恢复。
-  (void)session;
-  return -1;
+  int commands[2], results[2];
+  if(session->state[3] != 3 || session->state[2] != 0 || session->state[4] != 0)
+    return -1;
+  if(pipe(commands) < 0)
+    return -1;
+  if(pipe(results) < 0) {
+    close(commands[0]);
+    close(commands[1]);
+    return -1;
+  }
+  int pid = fork();
+  if(pid == 0) {
+    close(commands[1]);
+    close(results[0]);
+    prefetch_worker(session, commands[0], results[1]);
+  }
+  close(commands[0]);
+  close(results[1]);
+  if(pid < 0) {
+    close(commands[1]);
+    close(results[0]);
+    return -1;
+  }
+  session->state[4] = pid;
+  session->state[5] = commands[1];
+  session->state[6] = results[0];
+  session->state[7] = 0;
+  return 0;
 }
 
 int
 ai_student_prefetch_next(struct ai_session *session, int request)
 {
-  // TODO(LAB3-AI，选做)：非阻塞地请求预取给定 request 的 KV 记录。
-  (void)session;
-  (void)request;
-  return -1;
+  if(session->state[4] <= 0 || session->state[7] != 0 ||
+     request < 0 || request >= session->requests || request != session->state[2])
+    return -1;
+  if(transfer(session->state[5], &request, sizeof(request), 1) < 0)
+    return -1;
+  session->state[7] = 1;
+  return 0;
 }
 
 int
 ai_student_prefetch_wait(struct ai_session *session, int request)
 {
-  // TODO(LAB3-AI，选做)：等待对应预取完成，且不得改变父 worker 的文件偏移。
-  (void)session;
-  (void)request;
-  return -1;
+  int status;
+  if(session->state[4] <= 0 || session->state[7] != 1 ||
+     request != session->state[2])
+    return -1;
+  if(transfer(session->state[6], &status, sizeof(status), 0) < 0 || status < 0)
+    return -1;
+  session->state[7] = 2;
+  return 0;
 }
 
 int
 ai_student_prefetch_restore(struct ai_session *session, int request,
                             struct kv_entry *kv, struct ai_io *io)
 {
-  // TODO(LAB3-AI，选做)：把已由辅助进程从磁盘读取的完整记录交给父 worker。
-  // 这次恢复仍必须对应一次真实文件读取，并且只在完整交付后累计 KV 字节数。
-  (void)session;
-  (void)request;
-  (void)kv;
-  (void)io;
-  return -1;
+  if(session->state[4] <= 0 || session->state[7] != 2 ||
+     request < 0 || request >= session->requests || request != session->state[2])
+    return -1;
+  if(transfer(session->state[6], kv, AI_KV_FILE_BYTES, 0) < 0)
+    return -1;
+  session->state[2]++;
+  session->state[7] = 0;
+  io->kv_read_bytes += AI_KV_FILE_BYTES;
+  return 0;
 }
 
 void
 ai_student_prefetch_end(struct ai_session *session)
 {
-  // TODO(LAB3-AI，选做)：关闭管道、等待辅助进程并释放全部预取资源。
-  (void)session;
+  if(session->state[4] > 0) {
+    close(session->state[5]);
+    close(session->state[6]);
+    wait(0);
+    session->state[4] = 0;
+  }
 }

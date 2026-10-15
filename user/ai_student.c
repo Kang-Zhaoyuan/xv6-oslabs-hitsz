@@ -4,9 +4,9 @@
 #include "ai_student_impl.h"
 
 // 完成对应任务并通过单项测试后，将标志改为 1。
-#define AI_MODEL_TASK_IMPLEMENTED 0
-#define AI_KV_TASK_IMPLEMENTED 0
-#define AI_PREFETCH_TASK_IMPLEMENTED 0
+#define AI_MODEL_TASK_IMPLEMENTED 1
+#define AI_KV_TASK_IMPLEMENTED 1
+#define AI_PREFETCH_TASK_IMPLEMENTED 1
 
 static int
 student_begin_common(struct ai_session *session, int worker, int requests,

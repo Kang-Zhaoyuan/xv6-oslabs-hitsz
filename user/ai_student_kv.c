@@ -1,76 +1,116 @@
 #include "kernel/types.h"
+#include "kernel/fcntl.h"
 #include "user/user.h"
 
 #include "ai_student_impl.h"
 
+// state[1..3]: file descriptor, next request, phase (1 write, 2 closed, 3 read).
 int
 ai_student_kv_begin(struct ai_session *session)
 {
-  // TODO(LAB3-AI，附加题二)：初始化当前 worker 的 KV 持久化状态。
-  // 可采用每请求文件，也可采用每 worker 顺序流，但不得保留内存副本绕过恢复。
-  (void)session;
-  return -1;
+  session->state[1] = -1;
+  session->state[2] = 0;
+  session->state[3] = 0;
+  if(session->worker < 0 || session->worker >= AI_MAX_WORKERS ||
+     session->requests <= 0 || session->requests > AI_MAX_REQUESTS)
+    return -1;
+  return 0;
 }
 
 int
 ai_student_kv_begin_write(struct ai_session *session)
 {
-  // TODO(LAB3-AI，附加题二)：开始 KV 写入阶段并准备所需文件。
-  (void)session;
-  return -1;
+  char name[AI_STREAM_NAME_LEN];
+  if(session->state[3] != 0)
+    return -1;
+  ai_student_kv_name(name, session->worker);
+  unlink(name);
+  int fd = open(name, O_CREATE | O_WRONLY);
+  if(fd < 0)
+    return -1;
+  session->state[1] = fd;
+  session->state[2] = 0;
+  session->state[3] = 1;
+  return 0;
+}
+
+static int
+kv_transfer(struct ai_session *session, int request, struct kv_entry *kv,
+            struct ai_io *io, int writing)
+{
+  if(session->state[3] != (writing ? 1 : 3) || session->state[1] < 0 ||
+     request < 0 || request >= session->requests || request != session->state[2])
+    return -1;
+  int offset = 0;
+  while(offset < AI_KV_FILE_BYTES) {
+    int n;
+    if(writing)
+      n = write(session->state[1], (char *)kv + offset, AI_KV_FILE_BYTES - offset);
+    else
+      n = read(session->state[1], (char *)kv + offset, AI_KV_FILE_BYTES - offset);
+    if(n <= 0) {
+      session->state[3] = -1;
+      return -1;
+    }
+    offset += n;
+  }
+  session->state[2]++;
+  if(writing)
+    io->kv_write_bytes += AI_KV_FILE_BYTES;
+  else
+    io->kv_read_bytes += AI_KV_FILE_BYTES;
+  return 0;
 }
 
 int
 ai_student_kv_store(struct ai_session *session, int request,
                     struct kv_entry *kv, struct ai_io *io)
 {
-  // TODO(LAB3-AI，附加题二)：把当前请求的完整 KV cache 写入 xv6 文件系统。
-  // request 必须是 [0, session->requests) 内预期的下一条；非法序号返回 -1，
-  // 且不得改变文件位置、下一请求序号、KV 内容或 I/O 统计，后续合法调用仍须可用。
-  // 必须循环处理短写；只有 AI_KV_FILE_BYTES 字节全部成功后才更新统计。
-  // aiinfer 随后会立即释放原页面，因此不能依赖 kv 指针中的残留数据。
-  (void)session;
-  (void)request;
-  (void)kv;
-  (void)io;
-  return -1;
+  return kv_transfer(session, request, kv, io, 1);
 }
 
 int
 ai_student_kv_end_write(struct ai_session *session)
 {
-  // TODO(LAB3-AI，附加题二)：结束写阶段，确保文件状态完整并关闭写描述符。
-  (void)session;
-  return -1;
+  if(session->state[3] != 1 || session->state[2] != session->requests)
+    return -1;
+  close(session->state[1]);
+  session->state[1] = -1;
+  session->state[3] = 2;
+  return 0;
 }
 
 int
 ai_student_kv_begin_read(struct ai_session *session)
 {
-  // TODO(LAB3-AI，附加题二)：重新打开持久化文件，从文件起点开始恢复。
-  (void)session;
-  return -1;
+  char name[AI_STREAM_NAME_LEN];
+  if(session->state[3] != 2)
+    return -1;
+  ai_student_kv_name(name, session->worker);
+  int fd = open(name, O_RDONLY);
+  if(fd < 0)
+    return -1;
+  session->state[1] = fd;
+  session->state[2] = 0;
+  session->state[3] = 3;
+  return 0;
 }
 
 int
 ai_student_kv_restore(struct ai_session *session, int request,
                       struct kv_entry *kv, struct ai_io *io)
 {
-  // TODO(LAB3-AI，附加题二)：精确恢复当前请求的完整 KV cache。
-  // request 必须是 [0, session->requests) 内预期的下一条；非法序号返回 -1，
-  // 且不得改变文件位置、下一请求序号、目标 KV 内容或 I/O 统计，后续合法调用仍须可用。
-  // 目标页已被覆盖，必须循环处理短读；全部成功后再更新读取字节数。
-  // 单项验证：先运行 modelprep，再运行 aikvtest。
-  (void)session;
-  (void)request;
-  (void)kv;
-  (void)io;
-  return -1;
+  return kv_transfer(session, request, kv, io, 0);
 }
 
 void
 ai_student_kv_end(struct ai_session *session)
 {
-  // TODO(LAB3-AI，附加题二)：关闭 KV 文件并删除当前 worker 的临时持久化文件。
-  (void)session;
+  char name[AI_STREAM_NAME_LEN];
+  if(session->state[1] >= 0)
+    close(session->state[1]);
+  session->state[1] = -1;
+  session->state[3] = 0;
+  ai_student_kv_name(name, session->worker);
+  unlink(name);
 }
