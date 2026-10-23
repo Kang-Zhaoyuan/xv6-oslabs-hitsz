@@ -98,6 +98,7 @@ found:
   p->pid = allocpid();
   p->syscall_mask = ~0UL;
   p->syscall_loglen = 0;
+  p->child_count = 0;
   p->max_children = -1;
 
   // Allocate a trapframe page.
@@ -233,14 +234,9 @@ int fork(void) {
   struct proc *np;
   struct proc *p = myproc();
 
-  if (p->max_children >= 0) {
-    int children = 0;
-    acquire(&p->lock);
-    for (np = proc; np < &proc[NPROC]; np++)
-      if (np->parent == p) children++;
-    release(&p->lock);
-    if (children >= p->max_children) return -1;
-  }
+  if (p->max_children >= 0 &&
+      __sync_fetch_and_add(&p->child_count, 0) >= p->max_children)
+    return -1;
 
   // Allocate process.
   if ((np = allocproc()) == 0) {
@@ -256,6 +252,7 @@ int fork(void) {
   np->sz = p->sz;
 
   np->parent = p;
+  __sync_fetch_and_add(&p->child_count, 1);
   np->syscall_mask = p->syscall_mask;
   np->max_children = p->max_children;
 
@@ -296,6 +293,8 @@ void reparent(struct proc *p) {
       // because only the parent changes it, and we're the parent.
       acquire(&pp->lock);
       pp->parent = initproc;
+      __sync_fetch_and_sub(&p->child_count, 1);
+      __sync_fetch_and_add(&initproc->child_count, 1);
       // we should wake up init here, but that would require
       // initproc->lock, which would be a deadlock, since we hold
       // the lock on one of init's children (pp). this is why
@@ -414,6 +413,7 @@ int wait(uint64 addr, int nonblock) {
             release(&p->lock);
             return -1;
           }
+          __sync_fetch_and_sub(&p->child_count, 1);
           freeproc(np);
           release(&np->lock);
           release(&p->lock);
