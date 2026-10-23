@@ -24,6 +24,18 @@ main(int argc, char *argv[])
   // === Task 1: Syscall Allowlist ===
   printf("\n-- Task 1: Syscall Allowlist --\n");
 
+  int set_zero = seccomp_ctl(SECCOMP_SETMASK, 0);
+  int blocked_pid = getpid();
+  uint64 zero_log[32];
+  int zero_len = 32;
+  int read_zero = seccomp_getlog(zero_log, &zero_len);
+  int restore_mask = seccomp_ctl(SECCOMP_SETMASK, ~0UL);
+  check(set_zero == 0, "seccomp_ctl() accepts an empty allowlist");
+  check(blocked_pid == -1, "zero mask blocks ordinary syscalls");
+  check(read_zero == 0 && zero_len == 1 && zero_log[0] == 11,
+        "seccomp_getlog() bypasses allowlist");
+  check(restore_mask == 0, "seccomp_ctl() bypasses allowlist");
+
   // Only allow: write(16), exit(2), getpid(11), sbrk(12), close(21),
   //            seccomp_ctl(23), seccomp_getlog(24)
   uint64 mask = (1UL << 2) | (1UL << 11) | (1UL << 12) | (1UL << 16)
@@ -53,10 +65,29 @@ main(int argc, char *argv[])
     for (int i = 0; i < loglen; i++) {
       printf("    [%d] syscall %d blocked\n", i, (int)logbuf[i]);
     }
-    check(loglen >= 1, "audit log contains blocked syscalls");
+    check(loglen == 3 && logbuf[0] == 11 && logbuf[1] == 1 && logbuf[2] == 15,
+          "audit log contains blocked syscalls in order");
   } else {
     check(0, "audit log should not be empty");
   }
+
+  // Fork inherits the mask, with a fresh audit log.
+  uint64 inherited_mask = (1UL << 1) | (1UL << 2) | (1UL << 16);
+  seccomp_ctl(SECCOMP_SETMASK, inherited_mask);
+  pid = fork();
+  if (pid == 0) {
+    int child_pid = getpid();
+    uint64 child_log[32];
+    int child_len = 32;
+    int child_read = seccomp_getlog(child_log, &child_len);
+    exit(child_pid == -1 && child_read == 0 && child_len == 1 &&
+         child_log[0] == 11 ? 0 : 1);
+  }
+  seccomp_ctl(SECCOMP_SETMASK, ~0UL);
+  int child_status = -1;
+  int waited = wait(&child_status, 0);
+  check(pid > 0 && waited == pid && child_status == 0,
+        "child inherits allowlist and its own audit log");
 
   // === Task 3: Process Resource Limits ===
   printf("\n-- Task 3: Process Resource Limits --\n");
@@ -101,6 +132,22 @@ main(int argc, char *argv[])
   // Wait for remaining children
   wait(0, 0);
   wait(0, 0);
+
+  seccomp_ctl(SECCOMP_MAXCHILD, 1);
+  pid = fork();
+  if (pid == 0) {
+    int first = fork();
+    if (first == 0) exit(0);
+    int second = fork();
+    if (second == 0) exit(1);
+    if (first > 0) wait(0, 0);
+    if (second > 0) wait(0, 0);
+    exit(first > 0 && second == -1 ? 0 : 1);
+  }
+  child_status = -1;
+  waited = wait(&child_status, 0);
+  check(pid > 0 && waited == pid && child_status == 0,
+        "child inherits max-children limit");
 
   printf("\n--- %s ---\n", passed ? "seccomp test OK" : "seccomp test FAIL");
 
