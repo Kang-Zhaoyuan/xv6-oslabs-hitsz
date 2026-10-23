@@ -109,7 +109,8 @@ void syscall(void) {
 
   num = p->trapframe->a7;
   if (num > 0 && num < NELEM(syscalls) && syscalls[num]) {
-    if (num >= 64 || !(p->syscall_mask & (1UL << num))) {
+    if (num != SYS_seccomp_ctl && num != SYS_seccomp_getlog &&
+        (num >= 64 || !(p->syscall_mask & (1UL << num)))) {
       if (p->syscall_loglen == NELEM(p->syscall_log)) {
         memmove(p->syscall_log, p->syscall_log + 1,
                 sizeof(p->syscall_log) - sizeof(p->syscall_log[0]));
