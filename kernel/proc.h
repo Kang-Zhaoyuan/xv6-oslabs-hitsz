@@ -106,6 +106,7 @@ struct proc {
   uint64 syscall_mask;
   uint64 syscall_log[32];
   int syscall_loglen;
+  int child_count;
   int max_children;
   char name[16];               // Process name (debugging)
 };
