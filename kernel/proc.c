@@ -14,6 +14,7 @@ struct proc *initproc;
 
 int nextpid = 1;
 struct spinlock pid_lock;
+struct spinlock child_count_lock;
 
 extern void forkret(void);
 static void wakeup1(struct proc *chan);
@@ -26,6 +27,7 @@ void procinit(void) {
   struct proc *p;
 
   initlock(&pid_lock, "nextpid");
+  initlock(&child_count_lock, "child_count");
   for (p = proc; p < &proc[NPROC]; p++) {
     initlock(&p->lock, "proc");
 
@@ -99,6 +101,7 @@ found:
   p->syscall_mask = ~0UL;
   p->syscall_loglen = 0;
   p->max_children = -1;
+  p->child_count = 0;
 
   // Allocate a trapframe page.
   if ((p->trapframe = (struct trapframe *)kalloc()) == 0) {
@@ -233,17 +236,19 @@ int fork(void) {
   struct proc *np;
   struct proc *p = myproc();
 
-  if (p->max_children >= 0) {
-    int children = 0;
-    acquire(&p->lock);
-    for (np = proc; np < &proc[NPROC]; np++)
-      if (np->parent == p) children++;
-    release(&p->lock);
-    if (children >= p->max_children) return -1;
+  acquire(&child_count_lock);
+  if (p->max_children >= 0 && p->child_count >= p->max_children) {
+    release(&child_count_lock);
+    return -1;
   }
+  p->child_count++;
+  release(&child_count_lock);
 
   // Allocate process.
   if ((np = allocproc()) == 0) {
+    acquire(&child_count_lock);
+    p->child_count--;
+    release(&child_count_lock);
     return -1;
   }
 
@@ -251,6 +256,9 @@ int fork(void) {
   if (uvmcopy(p->pagetable, np->pagetable, p->sz) < 0) {
     freeproc(np);
     release(&np->lock);
+    acquire(&child_count_lock);
+    p->child_count--;
+    release(&child_count_lock);
     return -1;
   }
   np->sz = p->sz;
@@ -296,6 +304,10 @@ void reparent(struct proc *p) {
       // because only the parent changes it, and we're the parent.
       acquire(&pp->lock);
       pp->parent = initproc;
+      acquire(&child_count_lock);
+      p->child_count--;
+      initproc->child_count++;
+      release(&child_count_lock);
       // we should wake up init here, but that would require
       // initproc->lock, which would be a deadlock, since we hold
       // the lock on one of init's children (pp). this is why
@@ -415,6 +427,9 @@ int wait(uint64 addr, int nonblock) {
             return -1;
           }
           freeproc(np);
+          acquire(&child_count_lock);
+          p->child_count--;
+          release(&child_count_lock);
           release(&np->lock);
           release(&p->lock);
           return pid;

@@ -107,5 +107,6 @@ struct proc {
   uint64 syscall_log[32];
   int syscall_loglen;
   int max_children;
+  int child_count;             // Protected by child_count_lock.
   char name[16];               // Process name (debugging)
 };
